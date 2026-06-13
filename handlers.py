@@ -8,6 +8,7 @@ from google.appengine.ext import webapp
 import config
 import markup
 import models
+import page_logic
 import post_deploy
 import utils
 import xsrfutil
@@ -142,9 +143,7 @@ class RegenerateHandler(BaseHandler):
 
 
 class PageForm(djangoforms.ModelForm):
-  path = forms.RegexField(
-    widget=forms.TextInput(attrs={'id':'path'}), 
-    regex='(/[a-zA-Z0-9/]+)')
+  path = forms.CharField(widget=forms.TextInput(attrs={'id':'path'}))
   title = forms.CharField(widget=forms.TextInput(attrs={'id':'title'}))
   template = forms.ChoiceField(choices=config.page_templates.items())
   body = forms.CharField(widget=forms.Textarea(attrs={
@@ -156,11 +155,20 @@ class PageForm(djangoforms.ModelForm):
     fields = [ 'path', 'title', 'template', 'body' ]
 
   def clean_path(self):
-    data = self._cleaned_data()['path']
-    existing_page = models.Page.get_by_key_name(data)
-    if not data and existing_page:
-      raise forms.ValidationError("The given path already exists.")
-    return data
+    # Path format rules live in page_logic so the form, the model and the
+    # tests all agree on what a legal page path is.
+    try:
+      path = page_logic.validate_path(self._cleaned_data()['path'])
+    except ValueError, e:
+      raise forms.ValidationError(str(e))
+    # A page may keep its own path; only a *different* page already occupying
+    # this path is a collision.
+    original = None
+    if self.instance and self.instance.is_saved():
+      original = self.instance.path
+    if path != original and models.Page.get_by_key_name(path) is not None:
+      raise forms.ValidationError("A page already exists at '%s'." % path)
+    return path
 
 
 class PageAdminHandler(BaseHandler):
@@ -208,24 +216,19 @@ class PageHandler(BaseHandler):
   @xsrfutil.xsrf_protect
   @with_page
   def post(self, page):
-    form = None
-    # if the path has been changed, create a new page
-    if page and page.path != self.request.POST['path']:
-      form = PageForm(data=self.request.POST, instance=None, initial={})
-    else:
-      form = PageForm(data=self.request.POST, instance=page, initial={})
+    # Capture the original path before validating: djangoforms copies the
+    # submitted fields onto `page` during is_valid(), which would otherwise
+    # make a rename look like an in-place edit.
+    original_path = page.path if page else None
+    # Always bind to the page being edited (or None for a new page); the
+    # create / edit / rename decision is made inside models.Page.save_page.
+    form = PageForm(data=self.request.POST, instance=page)
     if form.is_valid():
-      oldpath = form._cleaned_data()['path']
-      if page:
-        oldpath = page.path
-      page = form.save(commit=False)
-      page.updated = datetime.datetime.now()
-      page.publish()
-      # path edited, remove old stuff
-      if page.path != oldpath:
-        oldpage = models.Page.get_by_key_name(oldpath)
-        oldpage.remove()
-      self.render_to_response("publishedpage.html", {'page': page})
+      data = form.cleaned_data
+      saved = models.Page.save_page(
+          original_path,
+          data['path'], data['title'], data['template'], data['body'])
+      self.render_to_response("publishedpage.html", {'page': saved})
     else:
       self.render_form(form)
 

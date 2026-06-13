@@ -8,6 +8,7 @@ from google.appengine.ext import deferred
 import config
 import generators
 import markup
+import page_logic
 import static
 import utils
 
@@ -163,19 +164,71 @@ class Page(db.Model):
 
   @property
   def hash(self):
-    val = (self.path, self.body, self.published)
+    val = (self.path, self.title, self.body, self.updated)
     return hashlib.sha1(str(val)).hexdigest()
 
   def publish(self):
-    self._key_name = self.path
+    # Only a brand new (unsaved) entity may have its key_name assigned; an
+    # existing entity's key is immutable, so a path change goes through
+    # save_page(), which creates a fresh entity at the new path.
+    if not self.is_saved():
+      self._key_name = self.path
     self.put()
-    generators.PageContentGenerator.generate_resource(self, self.path);
+    generators.PageContentGenerator.generate_resource(self, self.path)
 
   def remove(self):
-    if not self.is_saved():   
+    if not self.is_saved():
       return
     self.delete()
     generators.PageContentGenerator.generate_resource(self, self.path, action='delete')
+
+  @classmethod
+  def save_page(cls, original_path, path, title, template, body):
+    """Creates, edits, or renames a page; the single entry point for saves.
+
+    ``original_path`` is the path of the page being edited, or None when
+    creating a new page. Returns the live Page. Raises
+    ``page_logic.PageConflictError`` when ``path`` is already owned by a
+    different page.
+
+    Every create / edit-in-place / rename / collision decision is made by
+    ``page_logic.resolve_page_save`` so this stays the only code that mutates
+    pages, keeping the change-path behaviour consistent.
+    """
+    path = page_logic.validate_path(path)
+    if original_path is not None:
+      original_path = page_logic.normalize_path(original_path)
+    plan = page_logic.resolve_page_save(
+        original_path, path,
+        lambda p: cls.get_by_key_name(p) is not None)
+
+    page = None
+    if not plan.is_rename and original_path is not None:
+      # Edit in place: reuse the entity that already lives at this key_name.
+      page = cls.get_by_key_name(path)
+      if page is not None:
+        page.title = title
+        page.template = template
+        page.body = body
+    if page is None:
+      # New page, or rename (a new key_name requires a new entity).
+      page = cls(key_name=path, path=path, title=title, template=template,
+                 body=body)
+      if plan.is_rename:
+        original = cls.get_by_key_name(original_path)
+        if original is not None and original.created is not None:
+          page.created = original.created  # preserve creation date on rename
+
+    page.updated = datetime.datetime.now()
+    page.publish()
+
+    # Publish the new content first, then remove the old path's entity and its
+    # static page, so a rename never leaves a duplicate or a dangling page.
+    if plan.old_path_to_remove is not None:
+      old = cls.get_by_key_name(plan.old_path_to_remove)
+      if old is not None:
+        old.remove()
+    return page
 
 class VersionInfo(db.Model):
   bloggart_major = db.IntegerProperty(required=True)
