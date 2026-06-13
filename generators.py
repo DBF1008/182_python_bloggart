@@ -161,6 +161,23 @@ class ListingContentGenerator(ContentGenerator):
     pass
 
   @classmethod
+  def _remove_stale_pages(cls, resource, pagenum):
+    """Remove stale pagination pages starting from *pagenum*.
+
+    Called when the previous page was the last one with real content.
+    Walks forward one page at a time via deferred tasks: if the page at
+    *pagenum* exists in the datastore it is removed and cleanup continues
+    at *pagenum + 1*; if it does not exist the chain stops.
+
+    Args:
+      resource: The resource identifier (e.g. "index", tag slug, "YYYY/MM").
+      pagenum: The first page number to remove.
+    """
+    path = cls.path % {'resource': resource, 'pagenum': pagenum}
+    if static.remove(path):
+      deferred.defer(cls._remove_stale_pages, resource, pagenum + 1)
+
+  @classmethod
   def generate_resource(cls, post, resource, pagenum=1, start_ts=None):
     import models
     q = models.BlogPost.all().order('-published')
@@ -192,6 +209,11 @@ class ListingContentGenerator(ContentGenerator):
     if more_posts:
         deferred.defer(cls.generate_resource, None, resource, pagenum + 1,
                        posts[-2].published)
+    else:
+        # This is the last valid page — clean up any subsequent pages
+        # that may still exist from a previous generation pass when
+        # there were more posts (e.g. after deletions or tag removals).
+        cls._remove_stale_pages(resource, pagenum + 1)
 
 
 class IndexContentGenerator(ListingContentGenerator):
