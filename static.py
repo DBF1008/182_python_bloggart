@@ -12,6 +12,7 @@ from google.appengine.ext.webapp.util import run_wsgi_app
 
 import aetycoon
 import config
+import urls
 import utils
 
 
@@ -136,19 +137,11 @@ class StaticContentHandler(webapp.RequestHandler):
       self.response.set_status(304)
 
   def get(self, path):
-    if not path.startswith(config.url_prefix):
-      if path not in ROOT_ONLY_FILES:
-        self.error(404)
-        self.response.out.write(utils.render_template('404.html'))
-        return
-    else:
-      if config.url_prefix != '':
-        path = path[len(config.url_prefix):]# Strip off prefix
-        if path in ROOT_ONLY_FILES:# This lives at root
-          self.error(404)
-          self.response.out.write(utils.render_template('404.html'))
-          return
-    content = get(path)
+    # Map the (possibly prefixed) request path onto its prefix-free storage key.
+    # Returns None when the request falls outside this deployment's prefix or
+    # asks for a root-only file from beneath the prefix -> 404.
+    key = urls.resolve_static_path(path, config.url_prefix, ROOT_ONLY_FILES)
+    content = get(key) if key is not None else None
     if not content:
       self.error(404)
       self.response.out.write(utils.render_template('404.html'))
