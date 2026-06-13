@@ -55,6 +55,32 @@ def get(path):
   return entity
 
 
+def _schedule_sitemap_regeneration(now=None):
+  """Schedules a deferred regeneration of the sitemap.
+
+  The served sitemap (and its gzipped twin) must be rebuilt whenever an indexed
+  resource is added, removed, or has its path changed -- otherwise it keeps
+  advertising URLs that no longer resolve. The work is deferred and coalesced
+  per-minute (through the task name) so that a burst of changes only rebuilds
+  the sitemap once.
+
+  Args:
+    now: The reference time used to derive the task name and ETA. Defaults to
+      the current time.
+  """
+  if now is None:
+    now = datetime.datetime.now()
+  now = now.replace(second=0, microsecond=0)
+  try:
+    deferred.defer(
+        utils._regenerate_sitemap,
+        _name='sitemap-%s' % (now.strftime('%Y%m%d%H%M'),),
+        _eta=now + datetime.timedelta(seconds=65))
+  except (taskqueue.taskqueue.TaskAlreadyExistsError,
+          taskqueue.taskqueue.TombstonedTaskError):
+    pass
+
+
 def set(path, body, content_type, indexed=True, **kwargs):
   """Sets the StaticContent for the provided path.
 
@@ -80,15 +106,8 @@ def set(path, body, content_type, indexed=True, **kwargs):
       **defaults)
   content.put()
   memcache.replace(path, db.model_to_protobuf(content).Encode())
-  try:
-    eta = now.replace(second=0, microsecond=0) + datetime.timedelta(seconds=65)
-    if indexed:
-      deferred.defer(
-          utils._regenerate_sitemap,
-          _name='sitemap-%s' % (now.strftime('%Y%m%d%H%M'),),
-          _eta=eta)
-  except (taskqueue.taskqueue.TaskAlreadyExistsError, taskqueue.taskqueue.TombstonedTaskError), e:
-    pass
+  if indexed:
+    _schedule_sitemap_regeneration(now)
   return content
 
 def add(path, body, content_type, indexed=True, **kwargs):
@@ -108,16 +127,29 @@ def add(path, body, content_type, indexed=True, **kwargs):
 def remove(path):
   """Deletes a StaticContent.
 
+  Removing an indexed resource also schedules a sitemap regeneration, so that
+  the sitemap (and its gzipped copy) stop advertising the now-missing path.
+
   Args:
     path: Path of the static content to be removed.
+  Returns:
+    True if an indexed resource was removed (and a sitemap regeneration was
+    therefore scheduled); False otherwise.
   """
   memcache.delete(path)
   def _tx():
     content = StaticContent.get_by_key_name(path)
     if not content:
-      return
+      return False
+    was_indexed = content.indexed
     content.delete()
-  return db.run_in_transaction(_tx)
+    return was_indexed
+  was_indexed = db.run_in_transaction(_tx)
+  if was_indexed:
+    # Scheduled outside the transaction: named deferred tasks cannot be
+    # enqueued transactionally.
+    _schedule_sitemap_regeneration()
+  return was_indexed
 
 class StaticContentHandler(webapp.RequestHandler):
   def output_content(self, content, serve=True):
@@ -162,7 +194,7 @@ class StaticContentHandler(webapp.RequestHandler):
             HTTP_DATE_FMT)
         if last_seen >= content.last_modified.replace(microsecond=0):
           serve = False
-      except ValueError, e:
+      except ValueError as e:
         import logging
         logging.error('StaticContentHandler in static.py, ValueError:' + self.request.headers['If-Modified-Since'])
     if 'If-None-Match' in self.request.headers:
