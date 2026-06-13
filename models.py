@@ -92,6 +92,10 @@ class BlogPost(db.Model):
   def publish(self):
     regenerate = False
     if not self.path:
+      # Set timestamps before path allocation so format_post_path
+      # uses the correct published date.
+      self.published = datetime.datetime.now()
+      self.updated = self.published
       num = 0
       content = None
       while not content:
@@ -103,6 +107,8 @@ class BlogPost(db.Model):
       # Force regenerate on new publish. Also helps with generation of
       # chronologically previous and next page.
       regenerate = True
+    else:
+      self.updated = datetime.datetime.now()
 
     BlogDate.create_for_post(self)
 
@@ -113,6 +119,14 @@ class BlogPost(db.Model):
         else:
           generator_class.generate_resource(self, dep)
     self.put()
+
+    # Clean up the draft page corresponding to this post, if any.
+    self._cleanup_draft()
+
+  def _cleanup_draft(self):
+    """Remove the draft static content and cache entry for this post."""
+    draft_path = '/draft/' + utils.slugify(self.title)
+    static.remove(draft_path)
 
   def remove(self):
     if not self.is_saved():

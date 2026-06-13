@@ -97,10 +97,6 @@ class PostHandler(BaseHandler):
         post.published = datetime.datetime.max
         post.put()
       else:
-        if not post.path: # Publish post
-          post.updated = post.published = datetime.datetime.now()
-        else:# Edit post
-          post.updated = datetime.datetime.now()
         post.publish()
       self.render_to_response("published.html", {
           'post': post,
