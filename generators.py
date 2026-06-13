@@ -192,6 +192,28 @@ class ListingContentGenerator(ContentGenerator):
     if more_posts:
         deferred.defer(cls.generate_resource, None, resource, pagenum + 1,
                        posts[-2].published)
+    else:
+        # This was the last page. Remove any pages that were generated back when
+        # the listing was longer, so shrinking the post set doesn't leave stale
+        # pagination behind serving content that no longer belongs here.
+        deferred.defer(cls._remove_pages, resource, pagenum + 1)
+
+  @classmethod
+  def _remove_pages(cls, resource, pagenum):
+    """Removes stale listing pages from pagenum onward.
+
+    When a listing shrinks, the forward generation chain in generate_resource()
+    stops at the new last page and would otherwise leave the pages that existed
+    beyond it untouched. This walks forward deleting each page that still
+    exists, stopping at the first one that doesn't: pages are contiguous, so the
+    first gap marks the end of the stale tail. pagenum is always >= 2 here, so
+    cls.path (never first_page_path) is the correct format and the first page is
+    never removed.
+    """
+    path = cls.path % {'resource': resource, 'pagenum': pagenum}
+    if static.get(path):
+      static.remove(path)
+      deferred.defer(cls._remove_pages, resource, pagenum + 1)
 
 
 class IndexContentGenerator(ListingContentGenerator):
