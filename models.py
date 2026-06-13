@@ -89,8 +89,8 @@ class BlogPost(db.Model):
     val = (self.title, self.summary, self.tags, self.published)
     return hashlib.sha1(str(val)).hexdigest()
 
-  def publish(self):
-    regenerate = False
+  def publish(self, force=False):
+    regenerate = force
     if not self.path:
       num = 0
       content = None
@@ -113,6 +113,17 @@ class BlogPost(db.Model):
         else:
           generator_class.generate_resource(self, dep)
     self.put()
+    self._clear_draft()
+
+  def _clear_draft(self):
+    """Removes the draft preview page (if any) for this post's title.
+
+    Publishing from any entry point clears the matching /draft/<slug> page, so
+    the command-line script and the admin leave the site in the same state.
+    Uses static.remove() so the memcache entry is cleared too; a no-op when no
+    draft exists.
+    """
+    static.remove('/draft/' + utils.slugify(self.title))
 
   def remove(self):
     if not self.is_saved():
@@ -146,6 +157,52 @@ class BlogPost(db.Model):
         to_regenerate = new_deps ^ old_deps
       self.deps[generator_class.name()] = (new_deps, new_etag)
       yield generator_class, to_regenerate
+
+
+class PathExistsError(Exception):
+  """Raised when a published post already owns the target path.
+
+  publish_post() raises this on a path collision when force is not set, instead
+  of silently overwriting an existing post.
+  """
+
+
+def publish_post(title, body, tags, force=False):
+  """Creates or force-overwrites a published BlogPost from raw fields.
+
+  This is the single write/cleanup entry point shared by the command-line
+  publish script and (via BlogPost.publish) the admin handler, so static
+  content, caching, draft cleanup and dependent-page regeneration are handled
+  identically regardless of where the publish originates.
+
+  Args:
+    title: The post title.
+    body: The (already-extracted) post body markup.
+    tags: An iterable of tag strings.
+    force: If True, overwrite an existing post at the same path, fully
+      regenerating its static content and dependent pages. If False and a post
+      already owns the path, PathExistsError is raised.
+  Returns:
+    The published BlogPost entity.
+  """
+  now = datetime.datetime.now()
+  post = BlogPost(title=title, body=body, tags=tags, published=now, updated=now)
+  path = utils.format_post_path(post, 0)
+  existing = BlogPost.all().filter('path =', path).get()
+  if existing:
+    if not force:
+      raise PathExistsError(path)
+    existing.title = title
+    existing.body = body
+    existing.tags = tags
+    existing.updated = now
+    existing.publish(force=True)
+    return existing
+  # No published post owns this path: a normal first-time publish, which
+  # allocates the path (with collision suffixes) and regenerates everything.
+  post.publish()
+  return post
+
 
 class Page(db.Model):
   # The URL path to the page.
