@@ -1,5 +1,7 @@
 import datetime
 import hashlib
+import mimetypes
+import os
 
 from google.appengine.api import memcache
 from google.appengine.api import taskqueue
@@ -136,19 +138,32 @@ class StaticContentHandler(webapp.RequestHandler):
       self.response.set_status(304)
 
   def get(self, path):
-    if not path.startswith(config.url_prefix):
-      if path not in ROOT_ONLY_FILES:
+    # Resolve the internal lookup path from the request path.
+    prefix = config.url_prefix
+    if prefix and (path == prefix or path.startswith(prefix + '/')):
+      # Path is under the url_prefix — strip it to get the storage key.
+      lookup_path = path[len(prefix):]
+      if not lookup_path:
+        lookup_path = '/'
+      # ROOT_ONLY_FILES must not be served under the prefix.
+      if lookup_path in ROOT_ONLY_FILES:
         self.error(404)
         self.response.out.write(utils.render_template('404.html'))
         return
     else:
-      if config.url_prefix != '':
-        path = path[len(config.url_prefix):]# Strip off prefix
-        if path in ROOT_ONLY_FILES:# This lives at root
-          self.error(404)
-          self.response.out.write(utils.render_template('404.html'))
-          return
-    content = get(path)
+      # Path is at the root (or doesn't match the prefix).
+      lookup_path = path
+
+    content = get(lookup_path)
+
+    # Static file fallback: if the datastore has no content and the path
+    # looks like a theme static asset, serve directly from the filesystem.
+    # This handles the case where url_prefix causes /static/... URLs to
+    # bypass app.yaml's static file handler and fall through to this app.
+    if not content:
+      if self._try_serve_static_file(lookup_path):
+        return
+
     if not content:
       self.error(404)
       self.response.out.write(utils.render_template('404.html'))
@@ -171,6 +186,59 @@ class StaticContentHandler(webapp.RequestHandler):
       if content.etag in etags:
         serve = False
     self.output_content(content, serve)
+
+  def _try_serve_static_file(self, path):
+    """Attempt to serve a theme static file from the filesystem.
+
+    When url_prefix is set, template URLs like /static/theme/css/screen.css
+    become /blog/static/theme/css/screen.css.  The app.yaml static handler
+    only matches /static/... at the root, so prefixed requests fall through
+    to this WSGI app.  This method serves them from the themes directory.
+
+    Args:
+      path: The un-prefixed request path.
+    Returns:
+      True if the file was served, False otherwise.
+    """
+    static_prefix = '/static/'
+    if not path.startswith(static_prefix):
+      return False
+
+    remainder = path[len(static_prefix):]
+    parts = remainder.split('/', 1)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+      return False
+
+    theme_name, file_path = parts
+
+    # Validate theme name: only alphanumeric, hyphens, underscores.
+    if not all(c.isalnum() or c in '_-' for c in theme_name):
+      return False
+
+    # Resolve the filesystem path with traversal protection.
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    theme_static_dir = os.path.normpath(
+        os.path.join(base_dir, 'themes', theme_name, 'static'))
+    full_path = os.path.normpath(
+        os.path.join(theme_static_dir, file_path))
+
+    # Ensure the resolved path stays within the theme's static directory.
+    if not full_path.startswith(theme_static_dir + os.sep):
+      return False
+
+    if not os.path.isfile(full_path):
+      return False
+
+    content_type, _ = mimetypes.guess_type(full_path)
+    if content_type is None:
+      content_type = 'application/octet-stream'
+
+    with open(full_path, 'rb') as f:
+      body = f.read()
+
+    self.response.headers['Content-Type'] = content_type
+    self.response.out.write(body)
+    return True
 
 
 application = webapp.WSGIApplication([
