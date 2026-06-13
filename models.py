@@ -82,12 +82,12 @@ class BlogPost(db.Model):
   @property
   def hash(self):
     val = (self.title, self.body, self.published)
-    return hashlib.sha1(str(val)).hexdigest()
+    return hashlib.sha1(str(val).encode('utf-8')).hexdigest()
 
   @property
   def summary_hash(self):
     val = (self.title, self.summary, self.tags, self.published)
-    return hashlib.sha1(str(val)).hexdigest()
+    return hashlib.sha1(str(val).encode('utf-8')).hexdigest()
 
   def publish(self):
     regenerate = False
@@ -163,8 +163,8 @@ class Page(db.Model):
 
   @property
   def hash(self):
-    val = (self.path, self.body, self.published)
-    return hashlib.sha1(str(val)).hexdigest()
+    val = (self.path, self.body, self.updated)
+    return hashlib.sha1(str(val).encode('utf-8')).hexdigest()
 
   def publish(self):
     self._key_name = self.path
@@ -172,10 +172,11 @@ class Page(db.Model):
     generators.PageContentGenerator.generate_resource(self, self.path);
 
   def remove(self):
-    if not self.is_saved():   
+    if not self.is_saved():
       return
+    path = self.path
     self.delete()
-    generators.PageContentGenerator.generate_resource(self, self.path, action='delete')
+    generators.PageContentGenerator.generate_resource(self, path, action='delete')
 
 class VersionInfo(db.Model):
   bloggart_major = db.IntegerProperty(required=True)

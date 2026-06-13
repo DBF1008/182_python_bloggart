@@ -143,8 +143,9 @@ class RegenerateHandler(BaseHandler):
 
 class PageForm(djangoforms.ModelForm):
   path = forms.RegexField(
-    widget=forms.TextInput(attrs={'id':'path'}), 
-    regex='(/[a-zA-Z0-9/]+)')
+    widget=forms.TextInput(attrs={'id':'path'}),
+    regex=r'^/([a-zA-Z0-9/_\.\-]+)?$',
+    error_messages={'invalid': 'Path must start with / and contain only letters, digits, /, -, _, or .'})
   title = forms.CharField(widget=forms.TextInput(attrs={'id':'title'}))
   template = forms.ChoiceField(choices=config.page_templates.items())
   body = forms.CharField(widget=forms.Textarea(attrs={
@@ -155,10 +156,16 @@ class PageForm(djangoforms.ModelForm):
     model = models.Page
     fields = [ 'path', 'title', 'template', 'body' ]
 
+  def __init__(self, *args, **kwargs):
+    self._current_path = kwargs.pop('current_path', None)
+    super(PageForm, self).__init__(*args, **kwargs)
+
   def clean_path(self):
-    data = self._cleaned_data()['path']
+    data = self.cleaned_data.get('path', '')
+    if not data:
+      raise forms.ValidationError("Path cannot be empty.")
     existing_page = models.Page.get_by_key_name(data)
-    if not data and existing_page:
+    if existing_page and data != self._current_path:
       raise forms.ValidationError("The given path already exists.")
     return data
 
@@ -201,6 +208,7 @@ class PageHandler(BaseHandler):
   def get(self, page):
     self.render_form(PageForm(
         instance=page,
+        current_path=page and page.path or None,
         initial={
           'path': page and page.path or '/',
         }))
@@ -208,24 +216,25 @@ class PageHandler(BaseHandler):
   @xsrfutil.xsrf_protect
   @with_page
   def post(self, page):
-    form = None
-    # if the path has been changed, create a new page
-    if page and page.path != self.request.POST['path']:
-      form = PageForm(data=self.request.POST, instance=None, initial={})
-    else:
-      form = PageForm(data=self.request.POST, instance=page, initial={})
+    old_path = page.path if page else None
+    new_path = self.request.POST.get('path', '')
+    path_changed = page is not None and old_path != new_path
+
+    form = PageForm(
+        data=self.request.POST,
+        instance=page if not path_changed else None,
+        current_path=old_path,
+    )
     if form.is_valid():
-      oldpath = form._cleaned_data()['path']
-      if page:
-        oldpath = page.path
-      page = form.save(commit=False)
-      page.updated = datetime.datetime.now()
-      page.publish()
-      # path edited, remove old stuff
-      if page.path != oldpath:
-        oldpage = models.Page.get_by_key_name(oldpath)
-        oldpage.remove()
-      self.render_to_response("publishedpage.html", {'page': page})
+      page_obj = form.save(commit=False)
+      page_obj.updated = datetime.datetime.now()
+      page_obj.publish()
+      # path edited: remove the old entity and its static content
+      if path_changed and old_path:
+        old_page = models.Page.get_by_key_name(old_path)
+        if old_page:
+          old_page.remove()
+      self.render_to_response("publishedpage.html", {'page': page_obj})
     else:
       self.render_form(form)
 
